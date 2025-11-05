@@ -5,7 +5,7 @@ import Lobby from './pages/Lobby'
 import Game from './pages/Game'
 import Results from './pages/Results'
 import WalkieTalkie from './components/WalkieTalkie'
-import NotificationSystem from './components/NotificationSystem'
+import NotificationSystem from './components/NotificationSystem.jsx' // <— explicit .jsx
 
 export default function App() {
   const [toasts, setToasts] = React.useState([])
@@ -34,7 +34,7 @@ export default function App() {
           </Routes>
         </div>
 
-        {/* Mic only in-room routes */}
+        {/* Mic only when in a room */}
         {inRoom && <div className="walkie-talkie-fixed"><WalkieTalkie /></div>}
 
         <NotificationSystem items={toasts} onDone={(id)=>setToasts(t=>t.filter(x=>x.id!==id))}/>
