@@ -15,37 +15,27 @@ if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
 const mem = multer.memoryStorage();
 const disk = multer.diskStorage({
   destination: (req, file, cb) => cb(null, uploadsDir),
-  filename: (req, file, cb) => {
-    const safe = file.originalname.replace(/\s+/g,'_');
-    cb(null, `${Date.now()}-${safe}`);
-  }
+  filename: (req, file, cb) => cb(null, `${Date.now()}-${(file.originalname||'avatar').replace(/\s+/g,'_')}`)
 });
 
-// use memory only if S3 is fully configured
 const upload = multer({
   storage: isS3Configured() ? mem : disk,
   limits: { fileSize: 2 * 1024 * 1024 },
-  fileFilter: (req, file, cb) => {
-    if (!file.mimetype.startsWith('image/')) return cb(new Error('Only images allowed'));
-    cb(null, true);
-  }
+  fileFilter: (req, file, cb) => file.mimetype.startsWith('image/') ? cb(null, true) : cb(new Error('Only images'))
 });
 
 router.post('/avatar', upload.single('avatar'), async (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ error: 'No file' });
-
     if (isS3Configured()) {
       try {
         const url = await putAvatar(req.file.buffer, req.file.mimetype);
         return res.json({ url });
       } catch (e) {
-        // hard fallback to local file if S3 fails for any reason
-        const filename = `${Date.now()}-fallback.png`;
-        const p = path.join(uploadsDir, filename);
+        // hard fallback to local
+        const p = path.join(uploadsDir, `${Date.now()}-fallback.png`);
         await fs.promises.writeFile(p, req.file.buffer);
         const base = process.env.PUBLIC_BASE || `http://localhost:${process.env.PORT||5174}`;
-        return res.json({ url: `${base}/uploads/${filename}` });
+        return res.json({ url: `${base}/uploads/${path.basename(p)}` });
       }
     } else {
       const base = process.env.PUBLIC_BASE || `http://localhost:${process.env.PORT||5174}`;

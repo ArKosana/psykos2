@@ -8,7 +8,7 @@ import { createServer } from 'http';
 import { Server } from 'socket.io';
 import { PrismaClient } from '@prisma/client';
 import uploadRouter from './routes/upload.js';
-import { buildQuestions, generateCode } from './game/engine.js';
+import { buildQuestions, cleanPrompt } from './game/engine.js';
 
 const prisma = new PrismaClient();
 const app = express();
@@ -20,23 +20,22 @@ const __dirname = path.dirname(__filename);
 app.use(cors({ origin: (o,cb)=>cb(null,true), credentials:true }));
 app.use(express.json({ limit: '5mb' }));
 
-// local upload serving
+// static uploads (local dev)
 const uploadsDir = path.join(__dirname, './uploads');
 if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
 app.use('/uploads', express.static(uploadsDir));
 
 app.use('/upload', uploadRouter);
-
 app.get('/health', (req,res)=>res.json({ ok:true, ts:Date.now() }));
 
+// REST: create/join/update-avatar
 app.post('/create-game', async (req,res)=>{
   const { playerName, category, rounds=8, avatarUrl } = req.body;
   if (!playerName || !category) return res.status(400).json({ error:'Missing playerName/category' });
-  const code = generateCode();
+  // ensure fresh code (simple 4-letter human words recommended; skipped here)
+  const code = Math.random().toString(36).slice(2,6).toUpperCase();
   const game = await prisma.game.create({ data: { code, category, rounds, currentRound:0, state:'lobby' }});
-  const host = await prisma.player.create({
-    data: { name: playerName.trim(), isHost:true, score:0, gameId: game.id, avatarUrl: avatarUrl || null }
-  });
+  const host = await prisma.player.create({ data: { name: playerName.trim(), isHost:true, score:0, gameId: game.id, avatarUrl: avatarUrl||null }});
   res.json({ gameCode: code, playerId: host.id, category: game.category });
 });
 
@@ -44,16 +43,23 @@ app.post('/join-game', async (req,res)=>{
   const { code, playerName, avatarUrl } = req.body;
   const game = await prisma.game.findUnique({ where: { code }});
   if (!game) return res.status(404).json({ error:'Game not found' });
-  const player = await prisma.player.create({
-    data: { name: playerName.trim(), isHost:false, score:0, gameId: game.id, avatarUrl: avatarUrl || null }
-  });
+  const player = await prisma.player.create({ data: { name: playerName.trim(), isHost:false, score:0, gameId: game.id, avatarUrl: avatarUrl||null }});
   res.json({ playerId: player.id, category: game.category, rounds: game.rounds, gameInProgress: game.state!=='lobby' });
 });
 
+app.post('/player/update-avatar', async (req,res)=>{
+  const { playerId, avatarUrl } = req.body || {};
+  if (!playerId || !avatarUrl) return res.status(400).json({ error: 'Missing playerId/avatarUrl' });
+  await prisma.player.update({ where:{ id: playerId }, data:{ avatarUrl }});
+  res.json({ ok:true });
+});
+
+// SOCKETS
 const io = new Server(server, { cors: { origin: (o,cb)=>cb(null,true), credentials:true } });
 const socketsByPlayer = new Map();
 const playersBySocket = new Map();
-const readyPerRound = new Map();
+const readyLobby = new Map(); // code -> Set(playerId)
+const readyPerRound = new Map(); // roundId -> Set(playerId)
 
 function toast(code, msg){ io.to(code).emit('toast', msg); }
 function notice(code, msg){ io.to(code).emit('notice', msg); }
@@ -88,25 +94,35 @@ io.on('connection', (socket)=>{
     });
   });
 
+  // LOBBY READY
+  socket.on('lobby-ready', async ({ code, playerId, ready })=>{
+    if (!readyLobby.has(code)) readyLobby.set(code, new Set());
+    const set = readyLobby.get(code);
+    if (ready) set.add(playerId); else set.delete(playerId);
+    const game = await prisma.game.findUnique({ where: { code }, include:{ players:true }});
+    io.to(code).emit('lobby-ready-count', { count:set.size, total: game.players.length });
+  });
+
   socket.on('start-game', async (code)=>{
     const game = await prisma.game.findUnique({ where: { code }, include:{ players:true }});
     if (!game) return;
+    // all players must have readied up
+    const set = readyLobby.get(code) || new Set();
+    if (set.size !== game.players.length) { toast(code,'Everyone must tap Ready before start'); return; }
     if (game.players.length < 2) { toast(code,'Need at least 2 players to start'); return; }
 
     const names = game.players.map(p=>p.name);
     const questions = await buildQuestions(game.category, game.rounds, names);
-
-    await prisma.$transaction(questions.map((q,i)=>prisma.round.create({
-      data: { gameId: game.id, index: i+1, category: game.category, prompt: q.prompt, meta: q.meta }
-    })));
-
+    await prisma.$transaction(questions.map((q,i)=>prisma.round.create({ data: { gameId: game.id, index: i+1, category: game.category, prompt: q.prompt, meta: q.meta } })));
     await prisma.game.update({ where:{ id: game.id }, data:{ currentRound: 1, state:'playing' }});
     io.to(code).emit('game-started', { round:1, totalRounds: game.rounds, question: questions[0].prompt, category: game.category });
   });
 
+  // ANSWERS
   socket.on('submit-answer', async ({ code, playerId, text })=>{
     const game = await prisma.game.findUnique({ where: { code }});
     if (!game || game.state!=='playing') return;
+
     const round = await prisma.round.findFirst({ where: { gameId: game.id, index: game.currentRound }});
     await prisma.answer.deleteMany({ where: { roundId: round.id, playerId }});
     await prisma.answer.create({ data: { roundId: round.id, playerId, text: String(text||'').trim() }});
@@ -116,33 +132,30 @@ io.on('connection', (socket)=>{
     if (submitted === total) await startVotingOrScoring(io, prisma, game, round);
   });
 
+  // VOTES
   socket.on('submit-vote', async ({ code, voterId, targetId })=>{
     const game = await prisma.game.findUnique({ where: { code }});
     if (!game) return;
     const round = await prisma.round.findFirst({ where: { gameId: game.id, index: game.currentRound }});
-    if (!round || (game.state!=='voting' && game.state!=='who-guess')) return;
+    if (!round || game.state!=='voting') return;
     await prisma.vote.deleteMany({ where: { roundId: round.id, voterId }});
     await prisma.vote.create({ data: { roundId: round.id, voterId, targetId }});
     const voteCount = await prisma.vote.count({ where: { roundId: round.id }});
     const totalPlayers = await prisma.player.count({ where: { gameId: game.id }});
     io.to(code).emit('vote-count-update', { count: voteCount, total: totalPlayers });
-    if (game.state==='voting' && voteCount === totalPlayers) await finishVoting(io, prisma, game, round);
-    else if (game.state==='who-guess' && voteCount === totalPlayers) await finishWhoGuess(io, prisma, game, round);
+    if (voteCount === totalPlayers) await finishVoting(io, prisma, game, round);
   });
 
+  // SKIP strict majority floor(n/2)+1
   socket.on('skip-question', async ({ code, playerId })=>{
     const game = await prisma.game.findUnique({ where: { code }, include:{ players:true }});
     if (!game || game.state!=='playing') return;
-
     const round = await prisma.round.findFirst({ where: { gameId: game.id, index: game.currentRound }});
     socket.data[`skip-${round.id}`] = socket.data[`skip-${round.id}`] || new Set();
     socket.data[`skip-${round.id}`].add(playerId);
-
     const skipVotes = socket.data[`skip-${round.id}`].size;
     const total = game.players.length;
     io.to(code).emit('skip-votes-update', { skipVotes, totalPlayers: total });
-
-    // strict majority: floor(n/2)+1
     const majority = Math.floor(total/2) + 1;
     if (skipVotes >= majority) {
       const names = game.players.map(p=>p.name);
@@ -155,6 +168,7 @@ io.on('connection', (socket)=>{
     }
   });
 
+  // RESULTS READY
   socket.on('player-ready', async ({ code, playerId })=>{
     const game = await prisma.game.findUnique({ where:{ code }});
     if (!game) return;
@@ -180,6 +194,7 @@ io.on('connection', (socket)=>{
     }
   });
 
+  // LEAVE
   socket.on('leave-game', async ({ code, playerId, goHome })=>{
     const game = await prisma.game.findUnique({ where:{ code }, include:{ players:true }});
     if (!game) return;
@@ -203,6 +218,7 @@ io.on('connection', (socket)=>{
     if (sId) io.to(sId).emit('left-success', { goHome: !!goHome });
   });
 
+  // KICK
   socket.on('kick-player', async ({ code, hostId, targetId })=>{
     const game = await prisma.game.findUnique({ where:{ code }, include:{ players:true }});
     if (!game) return;
@@ -210,13 +226,14 @@ io.on('connection', (socket)=>{
     if (!host) return;
     await prisma.player.delete({ where:{ id: targetId }}).catch(()=>{});
     const fresh = await prisma.game.findUnique({ where:{ id: game.id }, include:{ players:true }});
-    notice(code, `${fresh.players.find(p=>p.id===targetId)?.name || 'A player'} was kicked`);
+    const kicked = game.players.find(p=>p.id===targetId)?.name || 'A player';
+    notice(code, `${kicked} was kicked`);
     io.to(code).emit('players-updated', fresh.players);
     const sId = socketsByPlayer.get(targetId);
     if (sId) io.to(sId).emit('kicked');
   });
 
-  // voice relay stays same
+  // VOICE relay
   socket.on('voice-start', ()=> {
     const room = Array.from(socket.rooms).find(r=>r!==socket.id);
     if (room) socket.to(room).emit('voice-start', socket.id);
@@ -250,11 +267,12 @@ io.on('connection', (socket)=>{
   });
 });
 
-// helpers (unchanged from previous message)
+// helper: voting & results
 async function startVotingOrScoring(io, prisma, game, round) {
   const answers = await prisma.answer.findMany({ where: { roundId: round.id }});
   const players = await prisma.player.findMany({ where: { gameId: game.id }});
   const meta = round.meta;
+
   if (meta.type === 'truth-comes-out' || meta.type === 'naked-truth') {
     const ids = players.map(p=>p.id);
     const targetId = ids[Math.floor(Math.random()*ids.length)];
@@ -271,9 +289,11 @@ async function startVotingOrScoring(io, prisma, game, round) {
     io.to(game.code).emit('show-results', await packResults(prisma, game, round, null));
     return;
   }
+
   let list = answers.map(a=>({ playerId: a.playerId, answer: a.text }));
   if (meta.type === 'acronyms') list.push({ playerId:'CORRECT', answer: meta.expansion });
   if (meta.type === 'is-that-a-fact') list.push({ playerId:'CORRECT', answer: meta.trueFact });
+
   await prisma.game.update({ where:{ id: game.id }, data:{ state:'voting' }});
   io.to(game.code).emit('start-voting', { answers: list.sort(()=>Math.random()-0.5), question: round.prompt, category: game.category });
 }
@@ -282,25 +302,28 @@ async function finishVoting(io, prisma, game, round) {
   const meta = round.meta;
   const votes = await prisma.vote.findMany({ where: { roundId: round.id }});
   const details = [];
+
   if (meta.type==='acronyms' || meta.type==='is-that-a-fact') {
     for (const v of votes) {
-      if (v.targetId==='CORRECT') { await prisma.player.update({ where:{ id: v.voterId }, data:{ score: { increment: 10 } }}); details.push({ voterId:v.voterId, targetId:v.targetId, correct:true }); }
-      else if (v.targetId!==v.voterId) { await prisma.player.update({ where:{ id: v.targetId }, data:{ score: { increment: 20 } }}); details.push({ voterId:v.voterId, targetId:v.targetId, correct:false, fooledBy:v.targetId }); }
+      if (v.targetId==='CORRECT') {
+        await prisma.player.update({ where:{ id: v.voterId }, data:{ score: { increment: 10 } }});
+        details.push({ voterId:v.voterId, targetId:v.targetId, correct:true });
+      } else if (v.targetId!==v.voterId) {
+        await prisma.player.update({ where:{ id: v.targetId }, data:{ score: { increment: 20 } }});
+        details.push({ voterId:v.voterId, targetId:v.targetId, correct:false, fooledBy:v.targetId });
+      }
     }
   } else {
     for (const v of votes) {
-      if (v.targetId!==v.voterId) { await prisma.player.update({ where:{ id: v.targetId }, data:{ score: { increment: 10 } }}); details.push({ voterId:v.voterId, targetId:v.targetId, correct:false }); }
+      if (v.targetId!==v.voterId) {
+        await prisma.player.update({ where:{ id: v.targetId }, data:{ score: { increment: 10 } }});
+        details.push({ voterId:v.voterId, targetId:v.targetId, correct:false });
+      }
     }
   }
+
   await prisma.game.update({ where:{ id: game.id }, data:{ state:'results' }});
   io.to(game.code).emit('show-results', await packResults(prisma, game, round, details));
-}
-
-async function finishWhoGuess(io, prisma, game, round) {
-  const votes = await prisma.vote.findMany({ where:{ roundId: round.id }});
-  for (const v of votes) await prisma.player.update({ where:{ id: v.voterId }, data:{ score: { increment: 10 } }});
-  await prisma.game.update({ where:{ id: game.id }, data:{ state:'results' }});
-  io.to(game.code).emit('show-results', await packResults(prisma, game, round, null));
 }
 
 async function packResults(prisma, game, round, details) {

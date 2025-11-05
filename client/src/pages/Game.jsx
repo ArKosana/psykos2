@@ -54,8 +54,8 @@ export default function Game({ pushToast }) {
   return (
     <div className="card">
       <div className="top-icons">
-        <span className="muted">R {round}/{totalRounds}</span>
-        <button className="icon-btn" title="Leave" onClick={()=>setShowLeave(true)}>⎋</button>
+        <button className="icon-btn" title="Menu" onClick={()=>setShowLeave(true)}>☰</button>
+        <span className="muted" style={{marginLeft:'auto'}}>R {round}/{totalRounds}</span>
       </div>
 
       <div className="question">{question || '…'}</div>
@@ -99,12 +99,12 @@ export default function Game({ pushToast }) {
       {showLeave && (
         <div className="sheet">
           <div className="sheet-card">
-            <h4>Leave</h4>
+            <h4>Menu</h4>
             <div className="actions">
-              <button className="btn" onClick={leaveToLobby}>To Lobby</button>
-              <button className="btn danger" onClick={leaveToHome}>To Home</button>
+              <button className="btn" onClick={leaveToLobby}>Leave to Lobby</button>
+              <button className="btn danger" onClick={leaveToHome}>Leave to Home</button>
             </div>
-            <button className="btn ghost" onClick={()=>setShowLeave(false)}>Cancel</button>
+            <button className="btn ghost" onClick={()=>setShowLeave(false)}>Close</button>
           </div>
         </div>
       )}
