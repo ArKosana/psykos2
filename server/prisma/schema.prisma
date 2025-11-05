@@ -1,0 +1,63 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Game {
+  id            String   @id @default(cuid())
+  code          String   @unique
+  category      String
+  rounds        Int
+  currentRound  Int       @default(0)
+  state         String    @default("lobby") // lobby | playing | voting | who-guess | results | game-over
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  players       Player[]
+  roundsHist    Round[]
+}
+
+model Player {
+  id        String  @id @default(cuid())
+  name      String
+  avatarUrl String?
+  isHost    Boolean @default(false)
+  score     Int     @default(0)
+  gameId    String
+  game      Game    @relation(fields: [gameId], references: [id])
+}
+
+model Round {
+  id          String   @id @default(cuid())
+  gameId      String
+  index       Int
+  category    String
+  prompt      String
+  meta        Json
+  answers     Answer[]
+  votes       Vote[]
+  results     Json?
+  createdAt   DateTime @default(now())
+  game        Game @relation(fields: [gameId], references: [id])
+}
+
+model Answer {
+  id        String   @id @default(cuid())
+  roundId   String
+  playerId  String
+  text      String
+  createdAt DateTime @default(now())
+  round     Round    @relation(fields: [roundId], references: [id])
+}
+
+model Vote {
+  id        String   @id @default(cuid())
+  roundId   String
+  voterId   String
+  targetId  String   // can be "CORRECT" in some modes
+  createdAt DateTime @default(now())
+  round     Round    @relation(fields: [roundId], references: [id])
+}
