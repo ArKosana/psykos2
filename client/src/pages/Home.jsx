@@ -1,72 +1,142 @@
-import React, { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
-import AvatarUploader from '../components/AvatarUploader.jsx'
+import React, { useEffect, useState } from 'react'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { post } from '../lib/api'
+import AvatarUploader from '../components/AvatarUploader'
 
 export default function Home({ pushToast }) {
-  const [name, setName] = useState(localStorage.getItem('name')||'')
-  const [avatar, setAvatar] = useState(localStorage.getItem('avatar')||'')
-  const [category, setCategory] = useState('acronyms')
-  const [rounds, setRounds] = useState(8)
-  const [busy, setBusy] = useState(false)
+  const [name, setName] = useState(localStorage.getItem('playerName') || '')
+  const [code, setCode] = useState('')
+  const [avatarUrl, setAvatarUrl] = useState(localStorage.getItem('avatarUrl') || '')
+  const [category, setCategory] = useState(localStorage.getItem('category') || 'acronyms')
+  const [rounds, setRounds] = useState(Number(localStorage.getItem('rounds') || 8))
+  const [busyCreate, setBusyCreate] = useState(false)
+  const [busyJoin, setBusyJoin] = useState(false)
   const navigate = useNavigate()
+  const [params] = useSearchParams()
 
-  const createRoom = async ()=>{
-    if (!name.trim()) return pushToast('Enter your name')
-    setBusy(true)
-    try {
-      const data = await post('/create-game', { playerName: name.trim(), category, rounds, avatarUrl: avatar||null })
-      localStorage.setItem('name', name.trim())
-      if (avatar) localStorage.setItem('avatar', avatar)
-      localStorage.setItem('playerId', data.playerId)
-      navigate(`/lobby/${data.gameCode}`)
-    } catch (e) {
-      pushToast('Could not create game')
-    } finally { setBusy(false) }
+  // If opened via share link: /join/ABCD or ?code=ABCD
+  useEffect(()=>{
+    const paramCode = params.get('code')
+    if (paramCode) setCode(paramCode.toUpperCase())
+    // hide any in-room-only UI from Home
+  }, [])
+
+  // Persist basics locally so refreshes keep UX
+  const persistBasics = () => {
+    localStorage.setItem('playerName', name.trim())
+    if (avatarUrl) localStorage.setItem('avatarUrl', avatarUrl)
+    localStorage.setItem('category', category)
+    localStorage.setItem('rounds', String(rounds))
   }
 
-  const goJoin = ()=>{
+  const onCreate = async () => {
     if (!name.trim()) return pushToast('Enter your name')
-    localStorage.setItem('name', name.trim())
-    if (avatar) localStorage.setItem('avatar', avatar)
-    navigate('/join/----')
+    setBusyCreate(true)
+    try {
+      persistBasics()
+      const body = { playerName: name.trim(), category, rounds, avatarUrl: avatarUrl || null }
+      const res = await post('/create-game', body)
+      // Store identifiers for later
+      localStorage.setItem('playerId', res.playerId)
+      localStorage.setItem('gameCode', res.gameCode)
+      // Go to lobby route that uses code param
+      navigate(`/lobby/${res.gameCode}`)
+    } catch (e) {
+      console.error(e)
+      pushToast(e.message || 'Could not create room')
+    } finally {
+      setBusyCreate(false)
+    }
+  }
+
+  const onJoin = async () => {
+    if (!name.trim()) return pushToast('Enter your name')
+    if (!code.trim() || code.trim().length !== 4) return pushToast('Enter a valid 4-letter code')
+    setBusyJoin(true)
+    try {
+      persistBasics()
+      const body = { code: code.trim().toUpperCase(), playerName: name.trim(), avatarUrl: avatarUrl || null }
+      const res = await post('/join-game', body)
+      localStorage.setItem('playerId', res.playerId)
+      localStorage.setItem('gameCode', code.trim().toUpperCase())
+      // If a game is already running, we still route to lobby; server will sync you
+      navigate(`/lobby/${code.trim().toUpperCase()}`)
+    } catch (e) {
+      console.error(e)
+      pushToast(e.message || 'Could not join room')
+    } finally {
+      setBusyJoin(false)
+    }
   }
 
   return (
-    <div className="card">
-      <h2>Welcome to PSYKOS</h2>
-      <p className="muted">Premium mobile party game</p>
+    <div className="card" style={{ maxWidth: 560, margin: '0 auto' }}>
+      <div style={{ display:'flex', alignItems:'baseline', gap:8, marginBottom:12 }}>
+        <h1 className="brand" style={{ margin:0 }}>PSYKOS</h1>
+        <span className="tagline">by Kosana</span>
+      </div>
 
-      <div className="grid">
-        <input className="input" placeholder="Your name" value={name} onChange={e=>setName(e.target.value)} maxLength={16}/>
-        <AvatarUploader value={avatar} onChange={setAvatar}/>
+      <div style={{ display:'flex', alignItems:'center', gap:12, marginBottom:16 }}>
+        <AvatarUploader value={avatarUrl} onChange={(url)=>{ setAvatarUrl(url); localStorage.setItem('avatarUrl', url) }} />
+        <input
+          className="input"
+          placeholder="Your name"
+          value={name}
+          onChange={e=>setName(e.target.value)}
+          maxLength={20}
+          style={{ flex:1 }}
+        />
+      </div>
 
-        <div className="grid cols-2">
-          <div>
-            <label className="muted">Category</label>
-            <select className="input" value={category} onChange={e=>setCategory(e.target.value)}>
-              <option value="acronyms">Acronyms</option>
-              <option value="is-that-a-fact">Is That a Fact?</option>
-              <option value="truth-comes-out">The Truth Comes Out</option>
-              <option value="naked-truth">The Naked Truth (18+)</option>
-              <option value="ice-breaker">Ice Breaker</option>
-              <option value="search-history">Search History</option>
-              <option value="who-among-us">Who Among Us</option>
-              <option value="ridleys-think-fast">Ridley’s Think Fast</option>
-              <option value="caption-this-image">Caption This (Image)</option>
-            </select>
-          </div>
-          <div>
-            <label className="muted">Rounds</label>
-            <input className="input" type="number" min="3" max="20" value={rounds} onChange={e=>setRounds(parseInt(e.target.value||8,10))}/>
-          </div>
+      <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:12 }}>
+        <div>
+          <label className="muted" style={{ fontSize:12 }}>Category</label>
+          <select className="input" value={category} onChange={e=>setCategory(e.target.value)}>
+            <option value="acronyms">Acronyms</option>
+            <option value="is-that-a-fact">Is That a Fact?</option>
+            <option value="truth-comes-out">The Truth Comes Out</option>
+            <option value="naked-truth">The Naked Truth (18+)</option>
+            <option value="ice-breaker">Ice Breaker</option>
+            <option value="search-history">Search History</option>
+            <option value="who-among-us">Who Among Us</option>
+            <option value="ridleys-think-fast">Ridley&apos;s Think Fast</option>
+            <option value="caption-this-image">Caption This (Image)</option>
+          </select>
         </div>
-
-        <div className="actions">
-          <button className="btn primary" onClick={createRoom} disabled={busy}>{busy?'Creating…':'Create Room'}</button>
-          <button className="btn" onClick={goJoin}>Join existing</button>
+        <div>
+          <label className="muted" style={{ fontSize:12 }}>Rounds</label>
+          <select className="input" value={rounds} onChange={e=>setRounds(Number(e.target.value))}>
+            {[6,8,10,12].map(r=><option key={r} value={r}>{r}</option>)}
+          </select>
         </div>
       </div>
+
+      <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:12, marginTop:14 }}>
+        <button className="btn primary" onClick={onCreate} disabled={busyCreate}>
+          {busyCreate ? 'Creating…' : 'Create Room'}
+        </button>
+        <button className="btn" onClick={onJoin} disabled={busyJoin}>
+          {busyJoin ? 'Joining…' : 'Join Room'}
+        </button>
+      </div>
+
+      <div style={{ display:'flex', gap:8, marginTop:10 }}>
+        <input
+          className="input"
+          placeholder="Enter 4-letter code"
+          value={code}
+          onChange={e=>setCode(e.target.value.toUpperCase().replace(/[^A-Z]/g,''))}
+          maxLength={4}
+          style={{ width: 200 }}
+        />
+        <button className="btn" onClick={()=>{ navigator.clipboard.writeText(`${location.origin}/join/${code || 'XXXX'}`); pushToast('Join link copied') }}>
+          Share Link
+        </button>
+      </div>
+
+      <p className="muted" style={{ marginTop:14, fontSize:12 }}>
+        Tip: Share link lets friends join on the same page without going back.
+      </p>
     </div>
   )
 }

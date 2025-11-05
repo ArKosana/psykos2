@@ -28,7 +28,13 @@ export default function Lobby({ pushToast }) {
     if (!me) { navigate(`/join/${code}`); return }
     socket.connect()
     socket.emit('join-live', { code, playerId: me })
-    socket.on('players-updated', (pls)=> { setPlayers(pls); setIsHost(!!pls.find(p=>p.id===me && p.isHost)) })
+
+    socket.on('players-updated', (pls)=> {
+      // pls objects should include .avatarUrl on server; we normalize to .avatar for UI
+      const norm = (pls||[]).map(p=>({ ...p, avatar: p.avatar || p.avatarUrl }))
+      setPlayers(norm)
+      setIsHost(!!norm.find(p=>p.id===me && p.isHost))
+    })
     socket.on('game-started', ()=> navigate(`/game/${code}`))
     socket.on('game-state', s=> { setCategory(s.category) })
     socket.on('lobby-ready-count', setReadyCount)
@@ -36,7 +42,12 @@ export default function Lobby({ pushToast }) {
     socket.on('kicked', ()=> { alert('You were kicked'); navigate('/home') })
     socket.on('left-success', ({goHome})=> navigate(goHome?'/home':`/lobby/${code}`))
     socket.on('game-aborted-to-lobby', ()=> navigate(`/lobby/${code}`))
-    return ()=> { socket.off('players-updated'); socket.off('game-started'); socket.off('game-state'); socket.off('lobby-ready-count'); socket.off('toast'); socket.off('notice'); socket.off('kicked'); socket.off('left-success'); socket.off('game-aborted-to-lobby') }
+
+    return ()=> {
+      socket.off('players-updated'); socket.off('game-started'); socket.off('game-state')
+      socket.off('lobby-ready-count'); socket.off('toast'); socket.off('notice')
+      socket.off('kicked'); socket.off('left-success'); socket.off('game-aborted-to-lobby')
+    }
   },[code])
 
   const share = ()=>{
@@ -69,19 +80,19 @@ export default function Lobby({ pushToast }) {
         </div>
       </div>
 
-      <h2>Lobby — {code}</h2>
-      <p className="muted">Category: {category}</p>
+      <h2 style={{marginTop:8, marginBottom:4}}>Lobby — {code}</h2>
+      <p className="muted" style={{marginTop:0}}>Category: {category}</p>
 
       <div className="players">
         {players.map(p=>(
           <div key={p.id} className="player-col">
-            <div className="bubble">{p.avatar ? <img src={p.avatar}/> : (p.name?.[0]||'?').toUpperCase()}</div>
+            <div className="bubble">{p.avatar ? <img src={p.avatar} alt={p.name}/> : (p.name?.[0]||'?').toUpperCase()}</div>
             <div className="player-name">{p.name}{p.isHost?' ⭐':''}</div>
           </div>
         ))}
       </div>
 
-      <div className="howto">
+      <div className="howto" style={{marginTop:12}}>
         <details>
           <summary>How to play</summary>
           <p className="muted" style={{marginTop:8}}>{HOWTO[category] || 'Have fun!'}</p>
